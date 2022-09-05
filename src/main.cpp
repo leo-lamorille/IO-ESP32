@@ -6,7 +6,7 @@
 #include "DNSServer.h"
 
 const char *ssid = "LE GROUPE 4 EST LE MEILLEUR";
-const char *password = "";
+const char *password = "mdp";
 
 AsyncWebServer server(80);
 DNSServer dnsServer;
