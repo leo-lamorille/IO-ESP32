@@ -73,7 +73,7 @@ bool modeConfig = true;
 bool modeSender = false;
 
 void printLocalTime();
-void sendMQTTData(int humidity, int temperature, int airQuality);
+void sendMQTTData(float humidity, float temperature, int airQuality);
 void callback(char *topic, byte *payload, unsigned int length);
 void clearPreferences();
 void connectToWifi(String SSID, String password);
@@ -152,7 +152,7 @@ void setup()
       client.setServer(ipServer.c_str(), 1883);
       client.connect("ESP32Client");
       client.setCallback(callback);
-      String topic = "sensor/params/";
+      String topic = "sensor/params/" + String(WiFi.macAddress());
       Serial.println(topic);
       client.subscribe(topic.c_str());
       setIntervalId = t.setInterval(collectData, delayTime);
@@ -203,19 +203,26 @@ void loop()
     timeClient.update();
     if (WiFi.status() == WL_CONNECTED)
     {
-      Serial.println(client.connected());
-      client.connect("ESP32Client");
-      String topic = "sensor/params/";
-      Serial.println(topic);
-      client.subscribe(topic.c_str());
-      if (!modeSender)
+      if (!client.connected())
       {
-        String jsonString = "{\"MacAddress\":\"" + String(WiFi.macAddress()) + "\",\"ip\":\"" + String(WiFi.localIP()) + "\",\"delay\": " + delayTime + "}";
-        client.publish("sensor/register", jsonString.c_str());
+        client.connect("ESP32Client");
+        client.setCallback(callback);
+        String topic = "sensor/params/" + String(WiFi.macAddress());
+        Serial.println(topic.c_str());
+        client.subscribe(topic.c_str());
       }
       else
       {
-        sendMQTTData(dht.readHumidity(), dht.readTemperature(), analogRead(35));
+        client.loop();
+        if (!modeSender)
+        {
+          String jsonString = "{\"MacAddress\":\"" + String(WiFi.macAddress()) + "\",\"ip\":\"" + String(WiFi.localIP()) + "\",\"delay\": " + delayTime + "}";
+          client.publish("sensor/register", jsonString.c_str());
+        }
+        else
+        {
+          collectData();
+        }
       }
     }
     else
@@ -262,7 +269,7 @@ void collectData()
   sendMQTTData(humidity, temperature, airQuality);
 }
 
-void sendMQTTData(int humidity, int temperature, int airQuality)
+void sendMQTTData(float humidity, float temperature, int airQuality)
 {
   Serial.println("send data");
   String jsonString = "{\"Humidity\":" + String(humidity) + ",\"Temperature\":" + String(temperature) + ",\"AirQuality\":" + String(airQuality);
