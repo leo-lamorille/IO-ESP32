@@ -48,6 +48,7 @@ AsyncTimer t;
 unsigned short setIntervalId;
 unsigned short setIntervalIdWifi;
 
+// HTML du captive portal
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head>
   <title>Captive Portal Demo</title>
@@ -72,6 +73,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 bool modeConfig = true;
 bool modeSender = false;
 
+// prototype des fonctions
 void printLocalTime();
 void sendMQTTData(float humidity, float temperature, int airQuality);
 void callback(char *topic, byte *payload, unsigned int length);
@@ -79,7 +81,11 @@ void clearPreferences();
 void connectToWifi(String SSID, String password);
 void collectData();
 void savePreference(String ssid, String password, String ip, int delay);
+void sendSensorParams();
+void loopInCaptivePortalMode();
+void loopInSenderMode();
 
+// classe pour la gestion des requetes lors que le formulaire est envoyé par l'utilisateur dans le captive portal
 class CaptiveRequestHandler : public AsyncWebHandler
 {
 public:
@@ -98,6 +104,7 @@ public:
   }
 };
 
+// fonction pour mettre en place le captive portal et récupérer les données du formulaire
 void setupServer()
 {
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -125,6 +132,46 @@ void setupServer()
       request->send(200, "text/html", "The values entered by you have been successfully sent to the device <br><a href=\"/\">Return to Home Page</a>"); });
 }
 
+void setupInCaptivePortalMode()
+{
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid);
+  Serial.print("AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+  setupServer();
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);
+  server.begin();
+  Serial.println("All Done!");
+}
+
+void setupInSenderMode()
+{
+  modeConfig = false;
+  connectToWifi(networkSSID, networkPassword);
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    int test = t.setInterval(collectData, delayTime * 1000);
+    timeClient.begin();
+    timeClient.setTimeOffset(3600);
+    Serial.println("WiFi connected");
+    dht.begin();
+    pinMode(35, INPUT);
+    client.setServer(ipServer.c_str(), 1883);
+
+    // setup du MQTT
+    client.connect("ESP32Client");
+    client.setCallback(callback);
+    String topic = "sensor/params/" + String(WiFi.macAddress());
+    client.subscribe(topic.c_str());
+    setIntervalId = t.setInterval(collectData, delayTime);
+  }
+  else
+  {
+    clearPreferences();
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -137,105 +184,76 @@ void setup()
   preferences.end();
 
   if (networkSSID != "" && networkPassword != "" && ipServer != "")
-  {
-    modeConfig = false;
-    connectToWifi(networkSSID, networkPassword);
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      timeClient.begin();
-      timeClient.setTimeOffset(3600);
-      Serial.println("WiFi connected");
-      Serial.println("IP address: ");
-      Serial.println(WiFi.localIP());
-      dht.begin();
-      pinMode(35, INPUT);
-      client.setServer(ipServer.c_str(), 1883);
-      client.connect("ESP32Client");
-      client.setCallback(callback);
-      String topic = "sensor/params/" + String(WiFi.macAddress());
-      Serial.println(topic);
-      client.subscribe(topic.c_str());
-      setIntervalId = t.setInterval(collectData, delayTime);
-    }
-    else
-    {
-      clearPreferences();
-    }
-  }
+    setupInSenderMode();
   else
-  {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(ssid);
-    Serial.print("AP IP address: ");
-    Serial.println(WiFi.softAPIP());
-    setupServer();
-    dnsServer.start(53, "*", WiFi.softAPIP());
-    server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);
-    server.begin();
-    Serial.println("All Done!");
-  }
+    setupInCaptivePortalMode();
 }
 
 void loop()
 {
-  if (modeConfig)
-  {
-    dnsServer.processNextRequest();
-    if (ipServer_received && networkSSID_received && networkPassword_received)
-    {
-      preferences.begin("IO", false);
-      preferences.putString("ip", ipServer);
-      preferences.putString("ssid", networkSSID);
-      preferences.putString("password", networkPassword);
-      preferences.putInt("delay", delayTime);
-      preferences.end();
+  t.handle();
 
-      ipServer_received = false;
-      networkSSID_received = false;
-      networkPassword_received = false;
-      ESP.restart();
+  if (modeConfig)
+    loopInCaptivePortalMode();
+  else
+    loopInSenderMode();
+}
+
+void loopInCaptivePortalMode()
+{
+  dnsServer.processNextRequest();
+  if (ipServer_received && networkSSID_received && networkPassword_received)
+  {
+    savePreference(networkSSID, networkPassword, ipServer, delayTime);
+
+    ipServer_received = false;
+    networkSSID_received = false;
+    networkPassword_received = false;
+    ESP.restart();
+  }
+}
+
+void loopInSenderMode()
+{
+  timeClient.update();
+  client.loop();
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    // on vérifie si on est connecté au serveur MQTT
+    // Si ce n'est pas le cas, alors on se reconnecte
+    if (!client.connected())
+    {
+      client.connect("ESP32Client");
+      client.setCallback(callback);
+      String topic = "sensor/params/" + String(WiFi.macAddress());
+      client.subscribe(topic.c_str());
+    }
+    else
+    {
+      // On vérifie s'il y a des données qui arrive depuis le serveur MQTT
+      // Si on est pas en mode envoie de données, alors on renvoit les parametres du capteur pour s'enregistrer sur le MQTT
+      if (!modeSender)
+        sendSensorParams();
     }
   }
   else
   {
-
-    delay(3000);
-    timeClient.update();
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      if (!client.connected())
-      {
-        client.connect("ESP32Client");
-        client.setCallback(callback);
-        String topic = "sensor/params/" + String(WiFi.macAddress());
-        Serial.println(topic.c_str());
-        client.subscribe(topic.c_str());
-      }
-      else
-      {
-        client.loop();
-        if (!modeSender)
-        {
-          String jsonString = "{\"MacAddress\":\"" + String(WiFi.macAddress()) + "\",\"ip\":\"" + String(WiFi.localIP()) + "\",\"delay\": " + delayTime + "}";
-          client.publish("sensor/register", jsonString.c_str());
-        }
-        else
-        {
-          collectData();
-        }
-      }
-    }
-    else
-    {
-      connectToWifi(networkSSID, networkPassword);
-      if (WiFi.status() != WL_CONNECTED)
-      {
-        clearPreferences();
-      }
-    }
+    // On essaie de se connecter au wifi
+    // si l'ESP32 n'y arrive pas alors on redémarre l'ESP32 en mode captive portal
+    connectToWifi(networkSSID, networkPassword);
+    if (WiFi.status() != WL_CONNECTED)
+      clearPreferences();
   }
 }
 
+// fonction pour envoyer les paramètres par defaut du capteur
+void sendSensorParams()
+{
+  String jsonString = "{\"MacAddress\":\"" + String(WiFi.macAddress()) + "\",\"ip\":\"" + String(WiFi.localIP()) + "\",\"delay\": " + delayTime + "}";
+  client.publish("sensor/register", jsonString.c_str());
+}
+
+// Fonction pour se connecter au réseau wifi
 void connectToWifi(String SSID, String password)
 {
   WiFi.begin(SSID.c_str(), password.c_str());
@@ -248,6 +266,7 @@ void connectToWifi(String SSID, String password)
   }
 }
 
+// fonction de callback qui est appelée lorsqu'un message est reçu du serveur MQTT
 void callback(char *topic, byte *payload, unsigned int length)
 {
   Serial.print("Message arrived [");
@@ -255,12 +274,13 @@ void callback(char *topic, byte *payload, unsigned int length)
   Serial.print("] ");
   DynamicJsonDocument doc(1024);
   deserializeJson(doc, payload);
-  delayTime = doc["delay"];
+  delayTime = doc["delay"].as<int>() * 1000;
   t.changeDelay(setIntervalId, delayTime);
   savePreference(networkSSID, networkPassword, ipServer, delayTime);
   modeSender = true;
 }
 
+// fonction qui récupère les données du capteur et appel la fonction qui envoie les données
 void collectData()
 {
   int humidity = dht.readHumidity();
@@ -269,6 +289,7 @@ void collectData()
   sendMQTTData(humidity, temperature, airQuality);
 }
 
+// function qui crée un objet JSON et l'envoie au serveur MQTT
 void sendMQTTData(float humidity, float temperature, int airQuality)
 {
   Serial.println("send data");
@@ -277,6 +298,7 @@ void sendMQTTData(float humidity, float temperature, int airQuality)
   client.publish("sensor/data", jsonString.c_str());
 }
 
+// fonction pour effacer les préférences dans la mémoire EEPROM
 void clearPreferences()
 {
   modeConfig = true;
@@ -286,6 +308,7 @@ void clearPreferences()
   ESP.restart();
 }
 
+// Fonction pour sauvegarder les préférences dans la mémoire EEPROM
 void savePreference(String ssid, String password, String ip, int delay)
 {
   preferences.begin("IO", false);
