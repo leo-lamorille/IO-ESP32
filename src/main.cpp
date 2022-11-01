@@ -35,7 +35,7 @@ Preferences preferences;
 String networkSSID;
 String networkPassword;
 String ipServer;
-int delayTime;
+int delayTime = 50;
 bool networkSSID_received = false;
 bool networkPassword_received = false;
 bool ipServer_received = false;
@@ -151,7 +151,6 @@ void setupInSenderMode()
   connectToWifi(networkSSID, networkPassword);
   if (WiFi.status() == WL_CONNECTED)
   {
-    int test = t.setInterval(collectData, delayTime * 1000);
     timeClient.begin();
     timeClient.setTimeOffset(3600);
     Serial.println("WiFi connected");
@@ -164,7 +163,8 @@ void setupInSenderMode()
     client.setCallback(callback);
     String topic = "sensor/params/" + String(WiFi.macAddress());
     client.subscribe(topic.c_str());
-    setIntervalId = t.setInterval(collectData, delayTime);
+    Serial.println(delayTime);
+    setIntervalId = t.setInterval(collectData, delayTime * 1000);
   }
   else
   {
@@ -271,11 +271,12 @@ void callback(char *topic, byte *payload, unsigned int length)
 {
   Serial.print("Message arrived [");
   Serial.print(topic);
-  Serial.print("] ");
+  Serial.print("] \n");
   DynamicJsonDocument doc(1024);
   deserializeJson(doc, payload);
-  delayTime = doc["delay"].as<int>() * 1000;
-  t.changeDelay(setIntervalId, delayTime);
+  const int tempinterval = doc["interval"].as<int>();
+
+  t.changeDelay(setIntervalId, delayTime * 1000);
   savePreference(networkSSID, networkPassword, ipServer, delayTime);
   modeSender = true;
 }
@@ -283,6 +284,7 @@ void callback(char *topic, byte *payload, unsigned int length)
 // fonction qui récupère les données du capteur et appel la fonction qui envoie les données
 void collectData()
 {
+  Serial.println("Collecting data");
   int humidity = dht.readHumidity();
   float temperature = dht.readTemperature();
   float airQuality = analogRead(35);
@@ -292,7 +294,6 @@ void collectData()
 // function qui crée un objet JSON et l'envoie au serveur MQTT
 void sendMQTTData(float humidity, float temperature, int airQuality)
 {
-  Serial.println("send data");
   String jsonString = "{\"Humidity\":" + String(humidity) + ",\"Temperature\":" + String(temperature) + ",\"AirQuality\":" + String(airQuality);
   jsonString += ",\"MacAddress\":\"" + String(WiFi.macAddress()) + "\",\"Time\":" + String(timeClient.getEpochTime()) + "}";
   client.publish("sensor/data", jsonString.c_str());
